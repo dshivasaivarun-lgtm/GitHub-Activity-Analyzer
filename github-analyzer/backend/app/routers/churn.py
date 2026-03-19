@@ -1,88 +1,24 @@
-import pandas as pd
-from typing import List, Dict, Any
+from fastapi import APIRouter, HTTPException
+from app.services.github_client import get_commits_with_stats, parse_owner_repo
+from app.analyzers.churn_analyzer import analyze_churn
 
-def analyze_churn(commit_details: List[Dict]) -> Dict[str, Any]:
+router = APIRouter()
+
+@router.get("/")
+async def repo_churn(repo_url: str, sample: int = 50):
     """
-    Analyze code churn from detailed commit data (each commit includes stats.additions/deletions).
-    commit_details: list of GitHub commit objects with stats included.
+    Analyze code churn for a repo.
+    sample: how many recent commits to fetch stats for (default 50, max 100).
+    Each commit = 1 API call, so keep sample reasonable.
     """
-    if not commit_details:
-        return {}
+    sample = min(sample, 100)
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+        commits = await get_commits_with_stats(owner, repo, sample=sample)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
-    rows = []
-    for c in commit_details:
-        stats = c.get("stats", {})
-        additions = stats.get("additions", 0)
-        deletions = stats.get("deletions", 0)
-        date_str = c.get("commit", {}).get("author", {}).get("date", "")
-        if not date_str:
-            continue
-        from datetime import datetime
-        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-        rows.append({
-            "sha": c.get("sha", "")[:7],
-            "date": dt,
-            "additions": additions,
-            "deletions": deletions,
-            "churn": additions + deletions,
-            "files_changed": len(c.get("files", [])),
-        })
+    if not commits:
+        raise HTTPException(status_code=404, detail="No commit data found")
 
-    if not rows:
-        return {}
-
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"], utc=True)
-    df["week"] = df["date"].dt.to_period("W").astype(str)
-
-    weekly = (
-        df.groupby("week")
-        .agg(additions=("additions", "sum"), deletions=("deletions", "sum"), commits=("sha", "count"))
-        .reset_index()
-    )
-
-    # Most churned files across all commits
-    file_churn: Dict[str, int] = {}
-    for c in commit_details:
-        for f in c.get("files", []):
-            fname = f.get("filename", "")
-            changes = f.get("additions", 0) + f.get("deletions", 0)
-            file_churn[fname] = file_churn.get(fname, 0) + changes
-
-    top_files = sorted(
-        [{"file": k, "churn": v} for k, v in file_churn.items()],
-        key=lambda x: -x["churn"]
-    )[:10]
-
-    total_additions = int(df["additions"].sum())
-    total_deletions = int(df["deletions"].sum())
-    total_churn     = total_additions + total_deletions
-    churn_ratio     = round(total_deletions / total_additions, 2) if total_additions > 0 else 0
-
-    # Detect spike weeks — weeks where churn > 2x the median
-    median_churn = float(weekly["additions"].add(weekly["deletions"]).median())
-    weekly["total_churn"] = weekly["additions"] + weekly["deletions"]
-    spikes = weekly[weekly["total_churn"] > median_churn * 2][["week", "total_churn"]].to_dict(orient="records")
-
-    # Churn stability score (0-20) for health scoring
-    # Low variance in weekly churn = stable = higher score
-    if len(weekly) > 1:
-        cv = float(weekly["total_churn"].std() / (weekly["total_churn"].mean() + 1))
-        stability_score = max(0, min(20, int(20 - cv * 10)))
-    else:
-        stability_score = 10
-
-    avg_churn_per_commit = round(total_churn / len(rows), 1) if rows else 0
-
-    return {
-        "total_additions":       total_additions,
-        "total_deletions":       total_deletions,
-        "total_churn":           total_churn,
-        "churn_ratio":           churn_ratio,
-        "avg_churn_per_commit":  avg_churn_per_commit,
-        "stability_score":       stability_score,
-        "commits_sampled":       len(rows),
-        "weekly_churn":          weekly[["week", "additions", "deletions", "total_churn"]].to_dict(orient="records"),
-        "top_churned_files":     top_files,
-        "churn_spikes":          spikes,
-    }
+    return analyze_churn(commits)
