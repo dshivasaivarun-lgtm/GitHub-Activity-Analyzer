@@ -7,11 +7,9 @@ import LanguageChart from './components/charts/LanguageChart'
 import PatternCard from './components/dashboard/PatternCard'
 import ActivityHeatmap from './components/charts/ActivityHeatmap'
 import ComparePage from './pages/ComparePage'
+import UserPage from './pages/UserPage'
 
 const API = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
-
-// Each section loads independently — UI never blocks waiting for slow calls
-const SECTIONS = ['summary', 'health', 'commits', 'heatmap', 'contributors', 'languages']
 
 function Skeleton({ h = 'h-40' }) {
   return <div className={`${h} bg-gray-800 rounded-xl animate-pulse`} />
@@ -26,8 +24,8 @@ export default function App() {
   const [page, setPage]       = useState('analyze')
   const [repoUrl, setRepoUrl] = useState('')
   const [started, setStarted] = useState(false)
-  const [loaded, setLoaded]   = useState({})   // which sections have resolved
-  const [data, setData]       = useState({})    // section data by key
+  const [loaded, setLoaded]   = useState({})
+  const [data, setData]       = useState({})
   const [error, setError]     = useState('')
 
   function setSection(key, value) {
@@ -35,16 +33,17 @@ export default function App() {
     setLoaded(prev => ({ ...prev, [key]: true }))
   }
 
-  async function analyze() {
-    if (!repoUrl.trim()) return
+  async function analyze(url) {
+    const target = url || repoUrl
+    if (!target.trim()) return
+    if (url) setRepoUrl(url)
+    if (page !== 'analyze') setPage('analyze')
     setStarted(true)
     setError('')
     setLoaded({})
     setData({})
 
-    // ── Fire all requests independently — each updates UI as it resolves ──
-    // 1. Core repo + commit stats (most important — fetch first)
-    axios.get(`${API}/api/repos/analyze`, { params: { repo_url: repoUrl } })
+    axios.get(`${API}/api/repos/analyze`, { params: { repo_url: target } })
       .then(r => {
         setSection('summary', r.data.repo)
         setSection('health',  r.data.health_score)
@@ -55,21 +54,18 @@ export default function App() {
       })
       .catch(e => setError(e.response?.data?.detail || 'Analysis failed'))
 
-    // 2. Heatmap — separate call, renders independently when ready
-    axios.get(`${API}/api/commits/heatmap`, { params: { repo_url: repoUrl } })
+    axios.get(`${API}/api/commits/heatmap`, { params: { repo_url: target } })
       .then(r => setSection('heatmap', r.data))
-      .catch(() => setSection('heatmap', []))  // heatmap failing shouldn't block anything
+      .catch(() => setSection('heatmap', []))
   }
 
-  const nav = (id, label) => (
-    <button onClick={() => setPage(id)}
-      className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors
-        ${page === id ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'}`}>
-      {label}
-    </button>
-  )
-
   const isLoading = key => started && !loaded[key]
+
+  const NAV_ITEMS = [
+    { id: 'analyze', label: '⬡ Analyze' },
+    { id: 'user',    label: '👤 User' },
+    { id: 'compare', label: '⇌ Compare' },
+  ]
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
@@ -79,17 +75,26 @@ export default function App() {
           <p className="text-gray-500 text-xs mt-0.5">Commits · Health · Contributors · Patterns</p>
         </div>
         <nav className="flex gap-2">
-          {nav('analyze', '⬡ Analyze')}
-          {nav('compare', '⇌ Compare')}
+          {NAV_ITEMS.map(({ id, label }) => (
+            <button key={id} onClick={() => setPage(id)}
+              className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors
+                ${page === id ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'}`}>
+              {label}
+            </button>
+          ))}
         </nav>
       </header>
 
       <main className="max-w-6xl mx-auto px-6 py-8">
+
+        {page === 'user' && (
+          <UserPage onAnalyzeRepo={fullName => analyze(fullName)} />
+        )}
+
         {page === 'compare' && <ComparePage />}
 
         {page === 'analyze' && (
           <>
-            {/* Search */}
             <div className="flex gap-3 mb-8">
               <input
                 className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white
@@ -99,7 +104,7 @@ export default function App() {
                 onChange={e => setRepoUrl(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && analyze()}
               />
-              <button onClick={analyze} disabled={started && !loaded.summary}
+              <button onClick={() => analyze()} disabled={started && !loaded.summary}
                 className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-6 py-3 rounded-lg font-medium transition-colors">
                 {started && !loaded.summary ? 'Loading…' : 'Analyze'}
               </button>
@@ -113,7 +118,6 @@ export default function App() {
 
             {started && (
               <>
-                {/* Repo header */}
                 <SectionShell loading={isLoading('summary')} fallback={<Skeleton h="h-14" />}>
                   {data.summary && (
                     <div className="flex items-start justify-between mb-6">
@@ -137,9 +141,10 @@ export default function App() {
                   )}
                 </SectionShell>
 
-                {/* Summary stat cards */}
                 <SectionShell loading={isLoading('summary')} fallback={
-                  <div className="grid grid-cols-4 gap-4 mb-6">{[...Array(4)].map((_,i) => <Skeleton key={i} h="h-20"/>)}</div>
+                  <div className="grid grid-cols-4 gap-4 mb-6">
+                    {[...Array(4)].map((_,i) => <Skeleton key={i} h="h-20"/>)}
+                  </div>
                 }>
                   {data.summary && (
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -151,7 +156,9 @@ export default function App() {
                       ].map(([label, value]) => (
                         <div key={label} className="bg-gray-800 rounded-xl p-4 text-center">
                           <div className="text-2xl font-bold text-white">
-                            {value != null ? value.toLocaleString() : <span className="animate-pulse text-gray-600">···</span>}
+                            {value != null
+                              ? value.toLocaleString()
+                              : <span className="animate-pulse text-gray-600">···</span>}
                           </div>
                           <div className="text-gray-400 text-sm mt-1">{label}</div>
                         </div>
@@ -160,20 +167,17 @@ export default function App() {
                   )}
                 </SectionShell>
 
-                {/* Health + patterns */}
                 <div className="grid md:grid-cols-2 gap-6 mb-6">
                   <SectionShell loading={isLoading('health')}><HealthGauge data={data.health} /></SectionShell>
                   <SectionShell loading={isLoading('patterns')}><PatternCard patterns={data.patterns} /></SectionShell>
                 </div>
 
-                {/* Heatmap — renders as soon as its own request resolves */}
                 <SectionShell loading={isLoading('heatmap')} fallback={<Skeleton h="h-36" />}>
                   {data.heatmap?.length > 0 && (
                     <div className="mb-6"><ActivityHeatmap data={data.heatmap} /></div>
                   )}
                 </SectionShell>
 
-                {/* Commit chart */}
                 <SectionShell loading={isLoading('commits')} fallback={<Skeleton h="h-52" />}>
                   {data.commits?.weekly_commits?.length > 0 && (
                     <div className="bg-gray-800 rounded-xl p-6 mb-6">
@@ -183,10 +187,13 @@ export default function App() {
                   )}
                 </SectionShell>
 
-                {/* Contributors + languages */}
                 <div className="grid md:grid-cols-2 gap-6">
-                  <SectionShell loading={isLoading('contributors')}><ContributorLeaderboard contributors={data.contributors?.leaderboard} /></SectionShell>
-                  <SectionShell loading={isLoading('languages')}><LanguageChart languages={data.languages} /></SectionShell>
+                  <SectionShell loading={isLoading('contributors')}>
+                    <ContributorLeaderboard contributors={data.contributors?.leaderboard} />
+                  </SectionShell>
+                  <SectionShell loading={isLoading('languages')}>
+                    <LanguageChart languages={data.languages} />
+                  </SectionShell>
                 </div>
               </>
             )}
