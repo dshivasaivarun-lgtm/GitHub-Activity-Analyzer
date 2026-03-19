@@ -147,3 +147,14 @@ def parse_owner_repo(repo_url: str):
     if len(parts) < 2 or not parts[0] or not parts[1]:
         raise ValueError("Invalid repo format. Use 'owner/repo' or a full GitHub URL.")
     return parts[0], parts[1]
+
+async def get_user(username: str) -> Dict[str, Any]:
+    return await _get(f"{BASE_URL}/users/{username}")
+
+async def get_user_repos(username: str, max_pages: int = 3) -> List[Dict]:
+    """Fetch all public repos for a user, sorted by most recently pushed."""
+    return await _get_paginated(
+        f"{BASE_URL}/users/{username}/repos",
+        params={"sort": "pushed", "direction": "desc", "type": "owner"},
+        max_pages=max_pages,
+    )
