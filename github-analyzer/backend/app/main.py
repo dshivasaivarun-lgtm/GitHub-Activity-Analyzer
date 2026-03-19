@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import repos, commits, health, export, compare, user
+from app.routers import repos, commits, health, export, compare, user, churn
 from app.db.database import init_db
 from app.services import github_client
 
@@ -34,6 +34,7 @@ app.include_router(health.router,   prefix="/api/health",   tags=["health"])
 app.include_router(export.router,   prefix="/api/export",   tags=["export"])
 app.include_router(compare.router,  prefix="/api/compare",  tags=["compare"])
 app.include_router(user.router,     prefix="/api/user",     tags=["user"])
+app.include_router(churn.router,    prefix="/api/churn",    tags=["churn"])
 
 @app.get("/")
 def root():
@@ -50,3 +51,4 @@ async def rate_limit_status():
         "reset_unix": core["reset"],
         "used": core["used"],
     }
+    
