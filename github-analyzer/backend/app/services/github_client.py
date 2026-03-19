@@ -158,3 +158,55 @@ async def get_user_repos(username: str, max_pages: int = 3) -> List[Dict]:
         params={"sort": "pushed", "direction": "desc", "type": "owner"},
         max_pages=max_pages,
     )
+
+async def get_commit_details_batch(
+    owner: str, repo: str, shas: List[str], max_concurrent: int = 5
+) -> List[Dict]:
+    """
+    Fetch full commit details (with stats + files) for a list of SHAs.
+    Batched to avoid hammering the API — max_concurrent requests at a time.
+    """
+    import asyncio
+    results = []
+
+    async def fetch_one(sha: str) -> Dict:
+        try:
+            return await _get(f"{BASE_URL}/repos/{owner}/{repo}/commits/{sha}")
+        except Exception:
+            return {}
+
+    # Process in batches of max_concurrent
+    for i in range(0, len(shas), max_concurrent):
+        batch = shas[i:i + max_concurrent]
+        batch_results = await asyncio.gather(*[fetch_one(sha) for sha in batch])
+        results.extend([r for r in batch_results if r])
+
+    return results
+
+async def get_commit_detail(owner: str, repo: str, sha: str) -> Dict[str, Any]:
+    """Fetch a single commit with file stats (additions/deletions per file)."""
+    return await _get(f"{BASE_URL}/repos/{owner}/{repo}/commits/{sha}")
+
+async def get_commits_with_stats(owner: str, repo: str, sample: int = 50) -> List[Dict]:
+    """
+    Fetch the last N commits WITH detailed file stats.
+    Uses 1 API call per commit — kept small (default 50) to protect rate limit.
+    Runs concurrently in batches of 10.
+    """
+    import asyncio
+    # First get the list of recent commits (1 call)
+    recent = await get_commits(owner, repo, max_pages=1)
+    shas = [c["sha"] for c in recent[:sample]]
+
+    results = []
+    batch_size = 10
+    for i in range(0, len(shas), batch_size):
+        batch = shas[i:i + batch_size]
+        batch_results = await asyncio.gather(
+            *[get_commit_detail(owner, repo, sha) for sha in batch],
+            return_exceptions=True,
+        )
+        for r in batch_results:
+            if isinstance(r, dict):
+                results.append(r)
+    return results
