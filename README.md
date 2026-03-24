@@ -277,11 +277,6 @@ docker-compose up --build
 
 ---
 
-## 📜 License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
----
 
 <div align="center">
 Built with ❤️ using FastAPI + React · Python 3.13 compatible
