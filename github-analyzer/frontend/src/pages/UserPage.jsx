@@ -3,242 +3,239 @@ import axios from 'axios'
 
 const API = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
-const HEALTH_COLOR = score =>
-  score >= 80 ? '#10b981' : score >= 60 ? '#3b82f6' : score >= 40 ? '#f59e0b' : '#ef4444'
+const healthColor = s => s >= 80 ? '#10b981' : s >= 60 ? '#3b82f6' : s >= 40 ? '#f59e0b' : '#ef4444'
+const healthLabel = s => s >= 80 ? 'Excellent' : s >= 60 ? 'Good' : s >= 40 ? 'Fair' : 'Needs Work'
 
-function HealthRing({ score, size = 48 }) {
-  const r = 18, c = 2 * Math.PI * r
-  const pct = (score / 100) * c
-  const color = HEALTH_COLOR(score)
+function HealthRing({ score }) {
+  const r = 18, c = 2 * Math.PI * r, pct = (score / 100) * c
+  const color = healthColor(score)
   return (
-    <svg width={size} height={size} viewBox="0 0 44 44">
+    <svg width="48" height="48" viewBox="0 0 44 44" style={{ flexShrink: 0 }}>
       <circle cx="22" cy="22" r={r} fill="none" stroke="#374151" strokeWidth="3.5"/>
       <circle cx="22" cy="22" r={r} fill="none" stroke={color} strokeWidth="3.5"
-        strokeDasharray={`${pct} ${c}`} strokeLinecap="round"
-        transform="rotate(-90 22 22)"/>
+        strokeDasharray={`${pct} ${c}`} strokeLinecap="round" transform="rotate(-90 22 22)"/>
       <text x="22" y="26" textAnchor="middle" fontSize="10" fontWeight="500" fill={color}>{score}</text>
     </svg>
   )
 }
 
-function StatCard({ label, value, sub }) {
-  return (
-    <div className="bg-gray-800 rounded-xl p-4 text-center">
-      <div className="text-2xl font-bold text-white">{value ?? '—'}</div>
-      <div className="text-gray-400 text-xs mt-1">{label}</div>
-      {sub && <div className="text-gray-500 text-xs mt-0.5">{sub}</div>}
-    </div>
-  )
-}
+const inp = (extra) => ({
+  background: '#1f2937', border: '1px solid #374151', borderRadius: 8,
+  padding: '10px 14px', color: '#fff', fontSize: 14, outline: 'none', ...extra
+})
 
-function RepoCard({ repo, onClick }) {
-  if (repo.error) return (
-    <div className="bg-gray-800 rounded-xl p-4 border border-red-900/40 opacity-60">
-      <div className="font-medium text-sm text-gray-300">{repo.name}</div>
-      <div className="text-xs text-red-400 mt-1">{repo.error}</div>
-    </div>
-  )
-  const h = repo.health
-  const color = HEALTH_COLOR(h?.total ?? 0)
-  return (
-    <div className="bg-gray-800 rounded-xl p-4 hover:bg-gray-750 cursor-pointer transition-colors border border-transparent hover:border-gray-600"
-      onClick={() => onClick(repo.full_name)}>
-      <div className="flex items-start justify-between gap-3 mb-2">
-        <div className="min-w-0">
-          <div className="font-medium text-sm text-white truncate">{repo.name}</div>
-          {repo.description && (
-            <div className="text-gray-400 text-xs mt-0.5 line-clamp-2">{repo.description}</div>
-          )}
-        </div>
-        <HealthRing score={h?.total ?? 0} />
-      </div>
-      <div className="flex items-center gap-3 text-xs text-gray-500 mt-3">
-        {repo.language && (
-          <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-blue-400 inline-block"/>
-            {repo.language}
-          </span>
-        )}
-        <span>★ {repo.stars?.toLocaleString()}</span>
-        <span>{repo.total_commits} commits</span>
-        <span className="ml-auto font-medium" style={{ color }}>{h?.label}</span>
-      </div>
-    </div>
-  )
+function friendlyError(e) {
+  if (!e.response) return 'Cannot reach the server. It may be waking up on Render free tier — wait 30 seconds and try again.'
+  const status = e.response?.status
+  const detail = e.response?.data?.detail || ''
+  if (status === 401) return 'GitHub token missing or invalid. Check GITHUB_TOKEN on Render.'
+  if (status === 404) return 'User not found. Double-check the username.'
+  if (status === 429) return `GitHub API rate limit hit. ${detail}`
+  if (status === 502 || status === 503) return 'Server error — backend may still be starting. Try again in 30 seconds.'
+  return detail || `Error ${status}: Failed to fetch user data.`
 }
 
 export default function UserPage({ onAnalyzeRepo }) {
-  const [username, setUsername] = useState('')
-  const [limit, setLimit]       = useState(10)
+  const [username, setUsername]   = useState('')
+  const [limit, setLimit]         = useState(10)
   const [skipForks, setSkipForks] = useState(true)
-  const [data, setData]         = useState(null)
-  const [phase, setPhase]       = useState('idle') // idle | listing | analyzing | done
-  const [error, setError]       = useState('')
-  const [filter, setFilter]     = useState('')
-  const [sortBy, setSortBy]     = useState('health')
+  const [data, setData]           = useState(null)
+  const [loading, setLoading]     = useState(false)
+  const [status, setStatus]       = useState('')
+  const [error, setError]         = useState('')
+  const [filter, setFilter]       = useState('')
+  const [sortBy, setSortBy]       = useState('health')
 
   async function fetchUser() {
     if (!username.trim()) return
-    setPhase('analyzing')
-    setError('')
-    setData(null)
+    setLoading(true); setError(''); setData(null); setStatus('')
     try {
+      // Ping first to wake Render free tier
+      setStatus('Waking up server…')
+      try { await axios.get(`${API}/ping`, { timeout: 35000 }) } catch {}
+
+      setStatus(`Looking up @${username.trim()}…`)
+      await axios.get(`${API}/api/user/profile`, {
+        params: { username: username.trim() }, timeout: 20000,
+      })
+
+      setStatus(`Analyzing ${limit} repos — this takes 20–40 seconds…`)
       const res = await axios.get(`${API}/api/user/analyze-all`, {
         params: { username: username.trim(), limit, skip_forks: skipForks },
+        timeout: 120000,
       })
       setData(res.data)
-      setPhase('done')
     } catch (e) {
-      setError(e.response?.data?.detail || 'Failed to fetch user data')
-      setPhase('idle')
+      setError(friendlyError(e))
+    } finally {
+      setLoading(false); setStatus('')
     }
   }
 
-  const sortedRepos = () => {
+  const sorted = () => {
     if (!data?.repos) return []
-    let repos = data.repos.filter(r =>
-      !filter || r.name.toLowerCase().includes(filter.toLowerCase())
-    )
-    if (sortBy === 'health')   repos = [...repos].sort((a,b) => (b.health?.total??0) - (a.health?.total??0))
-    if (sortBy === 'stars')    repos = [...repos].sort((a,b) => (b.stars??0) - (a.stars??0))
-    if (sortBy === 'commits')  repos = [...repos].sort((a,b) => (b.total_commits??0) - (a.total_commits??0))
-    if (sortBy === 'recent')   repos = [...repos].sort((a,b) => new Date(b.pushed_at||0) - new Date(a.pushed_at||0))
+    let repos = data.repos.filter(r => !filter || r.name.toLowerCase().includes(filter.toLowerCase()))
+    if (sortBy === 'health')  repos = [...repos].sort((a,b) => (b.health?.total||0) - (a.health?.total||0))
+    if (sortBy === 'stars')   repos = [...repos].sort((a,b) => (b.stars||0) - (a.stars||0))
+    if (sortBy === 'commits') repos = [...repos].sort((a,b) => (b.total_commits||0) - (a.total_commits||0))
+    if (sortBy === 'recent')  repos = [...repos].sort((a,b) => new Date(b.pushed_at||0) - new Date(a.pushed_at||0))
     return repos
   }
 
   return (
-    <div className="max-w-5xl mx-auto px-6 py-8">
-      <h1 className="text-2xl font-bold mb-2">User Analysis</h1>
-      <p className="text-gray-400 text-sm mb-6">Enter a GitHub username to analyze all their public repos at once.</p>
+    <div>
+      <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>User Analysis</div>
+      <div style={{ color: '#9ca3af', fontSize: 14, marginBottom: 24 }}>Enter a GitHub username to analyze all their public repos at once.</div>
 
-      {/* Input row */}
-      <div className="flex gap-3 mb-4">
-        <input
-          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white
-            placeholder-gray-500 focus:outline-none focus:border-blue-500"
-          placeholder="GitHub username (e.g. torvalds)"
-          value={username}
-          onChange={e => setUsername(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && fetchUser()}
-        />
-        <button onClick={fetchUser} disabled={phase === 'analyzing'}
-          className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-6 py-3 rounded-lg font-medium transition-colors whitespace-nowrap">
-          {phase === 'analyzing' ? 'Analyzing…' : 'Analyze User'}
+      <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
+        <input style={{ ...inp(), flex: 1 }} placeholder="GitHub username (e.g. torvalds)"
+          value={username} onChange={e => setUsername(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && fetchUser()} />
+        <button onClick={fetchUser} disabled={loading} style={{
+          background: '#2563eb', color: '#fff', border: 'none', borderRadius: 8,
+          padding: '10px 24px', fontSize: 14, fontWeight: 500, cursor: 'pointer',
+          opacity: loading ? 0.5 : 1, whiteSpace: 'nowrap',
+        }}>
+          {loading ? 'Analyzing…' : 'Analyze User'}
         </button>
       </div>
 
-      {/* Options */}
-      <div className="flex items-center gap-6 mb-6 text-sm text-gray-400">
-        <label className="flex items-center gap-2 cursor-pointer">
-          <span>Repos to analyze:</span>
+      <div style={{ display: 'flex', gap: 24, marginBottom: 24, fontSize: 13, color: '#9ca3af', alignItems: 'center' }}>
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          Repos:
           <select value={limit} onChange={e => setLimit(+e.target.value)}
-            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-white text-sm">
-            {[5, 10, 15, 20].map(n => <option key={n} value={n}>{n}</option>)}
+            style={{ ...inp({ padding: '4px 8px', fontSize: 13 }) }}>
+            {[5,10,15,20].map(n => <option key={n} value={n}>{n}</option>)}
           </select>
         </label>
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" checked={skipForks} onChange={e => setSkipForks(e.target.checked)}
-            className="accent-blue-500"/>
-          <span>Skip forked repos</span>
+        <label style={{ display: 'flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}>
+          <input type="checkbox" checked={skipForks} onChange={e => setSkipForks(e.target.checked)}/>
+          Skip forks
         </label>
       </div>
 
-      {error && (
-        <div className="bg-red-900/40 border border-red-700 text-red-300 px-4 py-3 rounded-lg mb-6">{error}</div>
+      {/* Progress indicator */}
+      {loading && status && (
+        <div style={{ background: '#1e3a5f', border: '1px solid #1d4ed8', color: '#93c5fd', padding: '12px 16px', borderRadius: 8, marginBottom: 16, fontSize: 13, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ width: 14, height: 14, borderRadius: '50%', border: '2px solid #3b82f6', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', flexShrink: 0 }}/>
+          {status}
+        </div>
       )}
 
-      {phase === 'analyzing' && (
-        <div className="space-y-3">
-          <div className="h-24 bg-gray-800 rounded-xl animate-pulse"/>
-          <div className="grid grid-cols-4 gap-4">
-            {[...Array(4)].map((_,i) => <div key={i} className="h-20 bg-gray-800 rounded-xl animate-pulse"/>)}
+      {loading && (
+        <div style={{ display: 'grid', gap: 12 }}>
+          <div style={{ height: 96, background: '#1f2937', borderRadius: 12, opacity: 0.5 }}/>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 10 }}>
+            {[...Array(5)].map((_,i) => <div key={i} style={{ height: 70, background: '#1f2937', borderRadius: 10, opacity: 0.4 }}/>)}
           </div>
-          <div className="grid md:grid-cols-2 gap-4">
-            {[...Array(6)].map((_,i) => <div key={i} className="h-28 bg-gray-800 rounded-xl animate-pulse"/>)}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            {[...Array(6)].map((_,i) => <div key={i} style={{ height: 100, background: '#1f2937', borderRadius: 10, opacity: 0.4 }}/>)}
           </div>
         </div>
       )}
 
-      {data && phase === 'done' && (
+      {error && (
+        <div style={{ background: '#450a0a', border: '1px solid #7f1d1d', color: '#fca5a5', padding: '14px 16px', borderRadius: 8, marginBottom: 24, fontSize: 13, lineHeight: 1.7 }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>Failed to fetch user data</div>
+          {error}
+          {error.includes('waking up') && (
+            <div style={{ marginTop: 8, color: '#fbbf24' }}>
+              ⚡ Render free tier spins down after 15 min of inactivity. First request takes ~30 seconds to wake up. Just wait and try again.
+            </div>
+          )}
+        </div>
+      )}
+
+      {data && !loading && (
         <>
-          {/* User profile card */}
-          <div className="bg-gray-800 rounded-xl p-5 mb-6 flex items-center gap-5">
-            <img src={data.user.avatar_url} alt={data.user.login}
-              className="w-16 h-16 rounded-full flex-shrink-0"/>
-            <div className="min-w-0">
-              <div className="text-lg font-bold text-white">{data.user.name || data.user.login}</div>
-              <div className="text-gray-400 text-sm">@{data.user.login}</div>
-              {data.user.bio && <div className="text-gray-400 text-sm mt-1 truncate">{data.user.bio}</div>}
+          <div style={{ background: '#1f2937', borderRadius: 12, padding: 20, marginBottom: 20, display: 'flex', gap: 20, alignItems: 'center' }}>
+            <img src={data.user.avatar_url} alt={data.user.login} style={{ width: 64, height: 64, borderRadius: '50%', flexShrink: 0 }}/>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 18, fontWeight: 700 }}>{data.user.name || data.user.login}</div>
+              <div style={{ color: '#9ca3af', fontSize: 13 }}>@{data.user.login}</div>
+              {data.user.bio && <div style={{ color: '#9ca3af', fontSize: 13, marginTop: 4 }}>{data.user.bio}</div>}
             </div>
-            <div className="ml-auto flex gap-4 text-center flex-shrink-0">
-              <div>
-                <div className="text-xl font-bold text-white">{data.user.public_repos}</div>
-                <div className="text-xs text-gray-500">repos</div>
-              </div>
-              <div>
-                <div className="text-xl font-bold text-white">{data.user.followers?.toLocaleString()}</div>
-                <div className="text-xs text-gray-500">followers</div>
-              </div>
+            <div style={{ display: 'flex', gap: 24, textAlign: 'center', flexShrink: 0 }}>
+              <div><div style={{ fontSize: 20, fontWeight: 700 }}>{data.user.public_repos}</div><div style={{ fontSize: 11, color: '#6b7280' }}>repos</div></div>
+              <div><div style={{ fontSize: 20, fontWeight: 700 }}>{data.user.followers?.toLocaleString()}</div><div style={{ fontSize: 11, color: '#6b7280' }}>followers</div></div>
             </div>
           </div>
 
-          {/* Summary stat cards */}
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-            <StatCard label="Repos analyzed"   value={data.summary.repos_analyzed} />
-            <StatCard label="Avg health score" value={data.summary.avg_health_score} />
-            <StatCard label="Total stars"      value={data.summary.total_stars?.toLocaleString()} />
-            <StatCard label="Total commits"    value={data.summary.total_commits?.toLocaleString()} />
-            <StatCard label="Top language"     value={data.summary.top_language || '—'} />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 12, marginBottom: 20 }}>
+            {[
+              ['Repos analyzed', data.summary.repos_analyzed],
+              ['Avg health',     data.summary.avg_health_score],
+              ['Total stars',    data.summary.total_stars?.toLocaleString()],
+              ['Total commits',  data.summary.total_commits?.toLocaleString()],
+              ['Top language',   data.summary.top_language || '—'],
+            ].map(([label, value]) => (
+              <div key={label} style={{ background: '#111827', borderRadius: 10, padding: 14, textAlign: 'center' }}>
+                <div style={{ fontSize: 20, fontWeight: 700 }}>{value}</div>
+                <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>{label}</div>
+              </div>
+            ))}
           </div>
 
-          {/* Language distribution */}
           {data.summary.language_distribution?.length > 0 && (
-            <div className="bg-gray-800 rounded-xl p-5 mb-6">
-              <div className="text-sm font-medium mb-3">Language distribution</div>
-              <div className="flex flex-wrap gap-2">
+            <div style={{ background: '#1f2937', borderRadius: 12, padding: 16, marginBottom: 20 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 10 }}>Language distribution</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {data.summary.language_distribution.map(({ language, count }) => (
-                  <span key={language}
-                    className="bg-gray-700 px-3 py-1 rounded-full text-xs text-gray-300">
-                    {language} <span className="text-gray-500 ml-1">{count}</span>
+                  <span key={language} style={{ background: '#374151', padding: '4px 12px', borderRadius: 20, fontSize: 12, color: '#d1d5db' }}>
+                    {language} <span style={{ color: '#6b7280' }}>{count}</span>
                   </span>
                 ))}
               </div>
             </div>
           )}
 
-          {/* Repo list with filter + sort */}
-          <div className="flex gap-3 mb-4">
-            <input
-              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm
-                text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-              placeholder="Filter repos by name…"
-              value={filter}
-              onChange={e => setFilter(e.target.value)}
-            />
+          <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+            <input style={{ ...inp({ flex: 1, padding: '8px 12px', fontSize: 13 }) }}
+              placeholder="Filter by name…" value={filter} onChange={e => setFilter(e.target.value)}/>
             <select value={sortBy} onChange={e => setSortBy(e.target.value)}
-              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white">
-              <option value="health">Sort: Health</option>
-              <option value="stars">Sort: Stars</option>
-              <option value="commits">Sort: Commits</option>
-              <option value="recent">Sort: Recent</option>
+              style={{ ...inp({ padding: '8px 12px', fontSize: 13 }) }}>
+              <option value="health">Health</option>
+              <option value="stars">Stars</option>
+              <option value="commits">Commits</option>
+              <option value="recent">Recent</option>
             </select>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-4">
-            {sortedRepos().map(repo => (
-              <RepoCard
-                key={repo.name}
-                repo={repo}
-                onClick={fullName => onAnalyzeRepo && onAnalyzeRepo(fullName)}
-              />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            {sorted().map(repo => (
+              <div key={repo.name} onClick={() => !repo.error && onAnalyzeRepo?.(repo.full_name)}
+                style={{ background: '#1f2937', borderRadius: 10, padding: 16, cursor: repo.error ? 'default' : 'pointer', border: '1px solid #374151' }}>
+                {repo.error ? (
+                  <>
+                    <div style={{ fontWeight: 500, fontSize: 13 }}>{repo.name}</div>
+                    <div style={{ color: '#f87171', fontSize: 12, marginTop: 4 }}>{repo.error}</div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 14 }}>{repo.name}</div>
+                        {repo.description && <div style={{ color: '#9ca3af', fontSize: 12, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{repo.description}</div>}
+                      </div>
+                      <HealthRing score={repo.health?.total ?? 0}/>
+                    </div>
+                    <div style={{ display: 'flex', gap: 14, fontSize: 12, color: '#6b7280' }}>
+                      {repo.language && <span>● {repo.language}</span>}
+                      <span>★ {repo.stars}</span>
+                      <span>{repo.total_commits} commits</span>
+                      <span style={{ marginLeft: 'auto', color: healthColor(repo.health?.total??0), fontWeight: 500 }}>
+                        {healthLabel(repo.health?.total??0)}
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
             ))}
           </div>
-
-          {sortedRepos().length === 0 && (
-            <div className="text-center text-gray-500 py-10">No repos match your filter.</div>
-          )}
+          {sorted().length === 0 && <div style={{ textAlign: 'center', color: '#6b7280', padding: 40 }}>No repos match your filter.</div>}
         </>
       )}
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   )
 }
